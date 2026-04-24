@@ -17,6 +17,8 @@ import {
   getPerCourseBreakdown,
   getAdminAnalyticsSummary,
   getAdminRevenueTimeSeries,
+  getAdminPerCourseBreakdown,
+  getInstructorsWithCourses,
   type TimePeriod,
 } from "./analyticsService";
 
@@ -1224,6 +1226,279 @@ describe("analyticsService", () => {
 
       expect(result.length).toBe(4);
       expect(result[0].date).toMatch(/^\d{4}-\d{2}$/);
+    });
+  });
+
+  // ─── Admin Per-Course Breakdown ───
+
+  describe("getAdminPerCourseBreakdown", () => {
+    it("returns empty array when no courses exist", () => {
+      const emptyDb = createTestDb();
+      testDb = emptyDb;
+      base = seedBaseData(testDb);
+
+      const otherInstructor = testDb
+        .insert(schema.users)
+        .values({
+          name: "Empty Instructor",
+          email: "empty@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      const result = getAdminPerCourseBreakdown({
+        period: "all",
+        instructorId: otherInstructor.id,
+      });
+
+      expect(result).toEqual([]);
+    });
+
+    it("returns all courses across instructors when no instructorId filter", () => {
+      const otherInstructor = testDb
+        .insert(schema.users)
+        .values({
+          name: "Other Instructor",
+          email: "other@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another course",
+          instructorId: otherInstructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+          price: 2999,
+        })
+        .run();
+
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result.length).toBe(2);
+    });
+
+    it("filters to only the specified instructor's courses", () => {
+      const otherInstructor = testDb
+        .insert(schema.users)
+        .values({
+          name: "Other Instructor",
+          email: "other@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another course",
+          instructorId: otherInstructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+          price: 2999,
+        })
+        .run();
+
+      const result = getAdminPerCourseBreakdown({
+        period: "all",
+        instructorId: base.instructor.id,
+      });
+
+      expect(result.length).toBe(1);
+      expect(result[0].title).toBe("Test Course");
+      expect(result[0].instructorName).toBe("Test Instructor");
+    });
+
+    it("includes instructor name in each row", () => {
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result.length).toBe(1);
+      expect(result[0].instructorName).toBe("Test Instructor");
+    });
+
+    it("aggregates revenue, sales, and enrollments per course", () => {
+      testDb
+        .insert(schema.purchases)
+        .values([
+          {
+            userId: base.user.id,
+            courseId: base.course.id,
+            pricePaid: 4999,
+            country: "US",
+          },
+          {
+            userId: base.instructor.id,
+            courseId: base.course.id,
+            pricePaid: 4999,
+            country: "US",
+          },
+        ])
+        .run();
+
+      testDb
+        .insert(schema.enrollments)
+        .values([
+          { userId: base.user.id, courseId: base.course.id },
+          { userId: base.instructor.id, courseId: base.course.id },
+        ])
+        .run();
+
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result[0].revenue).toBe(9998);
+      expect(result[0].salesCount).toBe(2);
+      expect(result[0].enrollmentCount).toBe(2);
+    });
+
+    it("includes listPrice from the course", () => {
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result[0].listPrice).toBe(base.course.price);
+    });
+
+    it("returns averageRating null when no ratings", () => {
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result[0].averageRating).toBeNull();
+      expect(result[0].ratingCount).toBe(0);
+    });
+
+    it("returns averageRating when ratings exist", () => {
+      testDb
+        .insert(schema.courseRatings)
+        .values([
+          { userId: base.user.id, courseId: base.course.id, rating: 4 },
+          { userId: base.instructor.id, courseId: base.course.id, rating: 5 },
+        ])
+        .run();
+
+      const result = getAdminPerCourseBreakdown({ period: "all" });
+
+      expect(result[0].averageRating).toBeCloseTo(4.5);
+      expect(result[0].ratingCount).toBe(2);
+    });
+
+    it("respects the time period filter for revenue", () => {
+      const tenDaysAgo = new Date();
+      tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
+
+      testDb
+        .insert(schema.purchases)
+        .values({
+          userId: base.user.id,
+          courseId: base.course.id,
+          pricePaid: 4999,
+          country: "US",
+          createdAt: tenDaysAgo.toISOString(),
+        })
+        .run();
+
+      const resultAll = getAdminPerCourseBreakdown({ period: "all" });
+      const result7d = getAdminPerCourseBreakdown({ period: "7d" });
+
+      expect(resultAll[0].revenue).toBe(4999);
+      expect(result7d[0].revenue).toBe(0);
+    });
+  });
+
+  // ─── getInstructorsWithCourses ───
+
+  describe("getInstructorsWithCourses", () => {
+    it("returns empty array when no instructors have courses", () => {
+      const emptyDb = createTestDb();
+      testDb = emptyDb;
+      base = seedBaseData(testDb);
+
+      testDb.delete(schema.courses).run();
+
+      const result = getInstructorsWithCourses();
+
+      expect(result).toEqual([]);
+    });
+
+    it("returns instructors who have at least one course", () => {
+      const result = getInstructorsWithCourses();
+
+      expect(result.length).toBe(1);
+      expect(result[0].id).toBe(base.instructor.id);
+      expect(result[0].name).toBe("Test Instructor");
+    });
+
+    it("does not return instructors who have no courses", () => {
+      const instructorNoCourse = testDb
+        .insert(schema.users)
+        .values({
+          name: "No Courses Instructor",
+          email: "nocourses@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      const result = getInstructorsWithCourses();
+
+      const ids = result.map((i) => i.id);
+      expect(ids).not.toContain(instructorNoCourse.id);
+    });
+
+    it("returns each instructor only once even with multiple courses", () => {
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Second Course",
+          slug: "second-course",
+          description: "Another",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+          price: 1999,
+        })
+        .run();
+
+      const result = getInstructorsWithCourses();
+
+      const ids = result.map((i) => i.id);
+      const unique = new Set(ids);
+      expect(unique.size).toBe(ids.length);
+    });
+
+    it("returns instructors ordered by name", () => {
+      const otherInstructor = testDb
+        .insert(schema.users)
+        .values({
+          name: "Alpha Instructor",
+          email: "alpha@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Alpha Course",
+          slug: "alpha-course",
+          description: "First alphabetically",
+          instructorId: otherInstructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+          price: 999,
+        })
+        .run();
+
+      const result = getInstructorsWithCourses();
+
+      expect(result[0].name).toBe("Alpha Instructor");
+      expect(result[1].name).toBe("Test Instructor");
     });
   });
 });
